@@ -1,0 +1,72 @@
+{
+  "sessions": [
+    {
+      "id": "307612012:307612012",
+      "data": {
+        "step": "choose_course"
+      }
+    },
+    {
+      "id": "6650254928:6650254928",
+      "data": {
+        "step": "ask_admin",
+        "courseType": "adults",
+        "course": "Хай Хиллс 18+ (пн/сб)"
+      }
+    },
+    {
+      "id": "1918223553:1918223553",
+      "data": {
+        "step": "choose_course"
+      }
+    },
+    {
+      "id": "482588400:482588400",
+      "data": {
+        "step": "choose_course",
+        "courseType": "adults"
+      }
+    },
+    {
+      "id": "1133579916:1133579916",
+      "data": {
+        "step": "choose_course",
+        "courseType": "adults",
+        "course": "Хай Хиллс 18+ (ср/сб)"
+      }
+    },
+    {
+      "id": "1166824021:1166824021",
+      "data": {
+        "step": "enter_name",
+        "courseType": "kids",
+        "course": "К-поп 13+ Продолжающие"
+      }
+    },
+    {
+      "id": "5753798074:5753798074",
+      "data": {
+        "step": "enter_name",
+        "courseType": "kids",
+        "course": "Джаз-фанк 8-12 Продолжающие",
+        "name": "денисова екатерина",
+        "phone": "89323128660",
+        "date": "Вторник"
+      }
+    },
+    {
+      "id": "530779496:530779496",
+      "data": {
+        "step": "choose_course"
+      }
+    },
+    {
+      "id": "1323800358:1323800358",
+      "data": {
+        "step": "enter_name",
+        "courseType": "adults",
+        "course": "Йога 16+"
+      }
+    }
+  ]
+}
