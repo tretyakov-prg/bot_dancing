@@ -1,0 +1,14 @@
+Домен	Скидка	SSL в подарок	Старая цена, ₽	Новая цена, ₽
+lucky-group.pro	-95%	Да	11 094	590
+lucky-group.shop	-99%	Да	12 697	189
+lucky-group.su	—	Нет	—	1 270
+lucky-group.club	—	Да	—	5 583
+lucky-group.expert	-92%	Да	19 591	1 639
+lucky-group.me	-59%	Да	3 353	1 389
+lucky-group.group	-87%	Да	10 109	1 312
+lucky-group.tech	-99%	Да	26 090	390
+lucky-group.store	-98%	Да	19 065	390
+lucky-group.online	-98%	Да	13 118	290
+lucky-group.art	-53%	Да	1 487	699
+lucky-group.com.ru	—	Нет	—	1 487
+lucky-group.market	-90%	Нет	14 635	1 515

@@ -3,15 +3,29 @@
     {
       "id": "307612012:307612012",
       "data": {
-        "step": "choose_course"
+        "step": "payment",
+        "courseType": "kids",
+        "course": "Хип-хоп 8-11",
+        "name": "Денис Третьяков",
+        "phone": "89817585988",
+        "date": "Четверг",
+        "userId": 307612012,
+        "username": "DarkDenisT",
+        "orderId": 2
       }
     },
     {
       "id": "6650254928:6650254928",
       "data": {
-        "step": "ask_admin",
+        "step": "payment",
         "courseType": "adults",
-        "course": "Хай Хиллс 18+ (пн/сб)"
+        "course": "Растяжка 16+",
+        "name": "Шибанова Светлана Валерьевна",
+        "phone": "89633210632",
+        "date": "Четверг",
+        "userId": 6650254928,
+        "username": "dance_jumping",
+        "orderId": 3
       }
     },
     {

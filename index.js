@@ -1,6 +1,8 @@
 const { Telegraf, Markup } = require('telegraf');
 const LocalSession = require('telegraf-session-local');
-const QRCode = require('qrcode');
+const { randomUUID } = require('crypto');
+const { invoiceFor, registerPayments } = require('./payments');
+const { createSbpService, isActiveSbp } = require('./sbp');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
@@ -11,7 +13,6 @@ const {
   COURSES_ADULTS,
   COURSES_ALL,
   MENU_BUTTONS,
-  QR_CONFIG,
   ORDER_STATUS,
   ORDER_STATUS_EMOJI,
   ORDER_STATUS_TEXT,
@@ -27,13 +28,13 @@ if (!token) {
 }
 
 const bot = new Telegraf(token);
-const session = new LocalSession({ database: 'sessions.json' });
+const session = new LocalSession({ database: path.join(__dirname, 'sessions.json') });
 bot.use(session.middleware());
 
 const ADMIN_ID = parseInt(process.env.ADMIN_ID) || 123456789;
 
 // ============ ФАЙЛОВОЕ ХРАНИЛИЩЕ ЗАЯВОК ============
-const DATA_DIR = './data';
+const DATA_DIR = path.join(__dirname, 'data');
 const ORDERS_FILE = path.join(DATA_DIR, 'orders.json');
 const COUNTER_FILE = path.join(DATA_DIR, 'counter.json');
 
@@ -49,17 +50,15 @@ function loadOrders() {
       return data;
     }
   } catch (error) {
-    console.error('❌ Ошибка загрузки заявок:', error.message);
+    throw new Error('Не удалось прочитать заявки; запуск остановлен', { cause: error });
   }
   return [];
 }
 
 function saveOrders() {
-  try {
-    fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2), 'utf8');
-  } catch (error) {
-    console.error('❌ Ошибка сохранения заявок:', error.message);
-  }
+  const temporary = ORDERS_FILE + '.tmp';
+  fs.writeFileSync(temporary, JSON.stringify(orders, null, 2), 'utf8');
+  fs.renameSync(temporary, ORDERS_FILE);
 }
 
 function loadCounter() {
@@ -83,12 +82,15 @@ function saveCounter() {
 }
 
 let orders = loadOrders();
-let orderCounter = loadCounter();
+let orderCounter = Math.max(loadCounter(), ...orders.map(o => o.id + 1));
+const sbp = createSbpService({ getOrders: () => orders, saveOrders, getAvailableSeats, telegram: bot.telegram, adminId: ADMIN_ID });
+const useSbp = () => process.env.PAYMENT_FLOW !== 'telegram';
 
 // ============ ФУНКЦИИ РАБОТЫ С ЗАЯВКАМИ ============
 
 function createOrder(session, course) {
   const order = {
+    paymentPayload: randomUUID(),
     id: orderCounter++,
     orderNumber: `#${String(orderCounter - 1).padStart(4, '0')}`,
     course: course.name,
@@ -203,7 +205,7 @@ function markNoShow(orderId, reason = '', by = 'admin') {
 function getOccupiedSeats(courseId) {
   return orders.filter(o => 
     o.courseId === courseId && 
-    STATUSES_OCCUPYING_SEAT.includes(o.status)
+    (STATUSES_OCCUPYING_SEAT.includes(o.status) || Boolean(o.checkoutQueryId) || isActiveSbp(o))
   ).length;
 }
 
@@ -348,15 +350,6 @@ function getDayButtons(courseId) {
 }
 
 // ============ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ============
-function generateQRCode(data) {
-  return new Promise((resolve, reject) => {
-    QRCode.toDataURL(data, QR_CONFIG, (err, url) => {
-      if (err) reject(err);
-      else resolve(url);
-    });
-  });
-}
-
 function isAdmin(ctx) {
   return ctx.from.id === ADMIN_ID;
 }
@@ -957,6 +950,27 @@ bot.action(/day_(.+)/, async (ctx) => {
 
 // ============ ОБРАБОТКА ТЕКСТА ============
 
+bot.command('sbp_reconcile', async ctx => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  const match = ctx.message.text.match(/^\/sbp_reconcile(?:@\w+)? (\d+) ([a-zA-Z0-9-]+)$/);
+  if (!match) return ctx.reply('Для восстановления после сбоя: /sbp_reconcile ID_заявки ID_платежа_ЮKassa');
+  const order = orders.find(o => o.id === Number(match[1]));
+  if (!order?.sbp) return ctx.reply('Платёж СБП для заявки не найден.');
+  try {
+    const payment = await sbp.reconcile(order, match[2]);
+    await ctx.reply(`Статус по данным ЮKassa: ${payment.status}`);
+  } catch (error) { await ctx.reply(`Не удалось сверить платёж: ${error.message}`); }
+});
+
+bot.command('payments', async ctx => {
+  if (ctx.chat.type !== 'private') return ctx.reply('Для оплаты откройте личный чат с ботом.');
+  const pending = orders.filter(o => o.userId === ctx.from.id && o.status === ORDER_STATUS.PENDING && !o.payment);
+  if (!pending.length) return ctx.reply('Нет заявок, ожидающих оплаты.');
+  for (const order of pending) await sendOrderInvoice(ctx, order);
+});
+
+registerPayments(bot, { getOrders: () => orders, saveOrders, getAvailableSeats, adminId: ADMIN_ID });
+
 bot.on('text', async (ctx) => {
   const text = ctx.message.text.trim();
   
@@ -1078,77 +1092,95 @@ bot.on('text', async (ctx) => {
 
 // ============ ПОДТВЕРЖДЕНИЕ ============
 
-bot.action('confirm', async (ctx) => {
-  const course = COURSES_ALL[ctx.session.course];
-  const amount = course.price;
-  const paymentData = `Оплата танцев: ${course.name}, ${ctx.session.name}`;
-  
-  const available = getAvailableSeats(ctx.session.course);
-  if (available <= 0) {
-    await ctx.answerCbQuery('❌ Мест больше нет', { show_alert: true });
-    await ctx.editMessageText(
-      '😔 К сожалению, места закончились, пока вы заполняли форму.\n\n' +
-      'Попробуйте выбрать другой курс.',
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('👶 Детские группы', 'show_kids')],
-          [Markup.button.callback('🧑 Взрослые группы', 'show_adults')]
-        ])
-      }
-    );
+function paymentMethodsKeyboard(order) {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('💳 Оплатить картой', `pay_bank_card_${order.id}`)],
+    [Markup.button.callback('🏦 Оплатить через СБП', `pay_sbp_${order.id}`)]
+  ]);
+}
+
+bot.action(/^pay_(bank_card|sbp)_(\d+)$/, async ctx => {
+  const order = orders.find(o => o.id === Number(ctx.match[2]) && o.userId === ctx.from.id);
+  if (!order || ctx.chat.type !== 'private') return ctx.answerCbQuery('Заявка не найдена.');
+  if (order.payment || order.status !== ORDER_STATUS.PENDING) return ctx.answerCbQuery('Заявка уже обработана.');
+  await ctx.answerCbQuery('Готовлю оплату…');
+  try {
+    const payment = await sbp.ensure(order, ctx.match[1]);
+    if (payment.status === 'succeeded') return ctx.reply('✅ Оплата уже получена.');
+    if (!payment.url) return ctx.reply('Платёж ещё обрабатывается. Попробуйте немного позже.');
+    const method = payment.method || payment.requestBody?.payment_method_data?.type || 'sbp';
+    const alreadyCreated = method !== ctx.match[1]
+      ? 'По этой заявке уже открыт платёж другим способом. Завершите его или дождитесь отмены, чтобы сменить способ.\n' : '';
+    await ctx.reply(alreadyCreated + (method === 'bank_card'
+      ? `К оплате: ${order.amount} ₽. Откройте защищённую страницу ЮKassa и оплатите банковской картой.`
+      : `К оплате: ${order.amount} ₽. Выберите банк и подтвердите платёж в его приложении. На компьютере откроется QR-код.`), {
+      ...Markup.inlineKeyboard([
+        [Markup.button.url(method === 'bank_card' ? '💳 Перейти к оплате картой' : '🏦 Перейти к оплате через СБП', payment.url)],
+        [Markup.button.callback('Проверить оплату', `sbp_check_${order.id}`)]
+      ])
+    });
+  } catch (error) {
+    console.error(`Не удалось создать платёж по заявке ${order.id}:`, error.message);
+    const unavailable = error.yookassa?.description?.includes('Payment method is not available');
+    await ctx.reply(unavailable
+      ? 'Этот способ оплаты пока недоступен в магазине. Выберите другой способ.'
+      : 'Не удалось подготовить оплату. Повторите попытку позже или свяжитесь с администратором.', paymentMethodsKeyboard(order));
+  }
+});
+
+async function sendOrderInvoice(ctx, order) {
+  if (ctx.chat.type !== 'private' || order.userId !== ctx.from.id) return;
+  if (order.status !== ORDER_STATUS.PENDING || order.payment) return ctx.reply('Эта заявка уже обработана.');
+  if (!order.paymentPayload) { order.paymentPayload = randomUUID(); saveOrders(); }
+  try {
+    if (useSbp() || order.sbp) {
+      await ctx.reply(`Заявка ${order.orderNumber}. К оплате: ${order.amount} ₽.\nВыберите способ оплаты:`, paymentMethodsKeyboard(order));
+    } else {
+      await ctx.replyWithInvoice(invoiceFor(order));
+    }
+  } catch (error) {
+    console.error('Не удалось отправить счёт:', error.description || error.message);
+    await ctx.reply('Не удалось выставить счёт. Для повторной попытки используйте /payments или свяжитесь с администратором.');
+  }
+}
+
+
+bot.action(/^sbp_check_(\d+)$/, async ctx => {
+  const order = orders.find(o => o.id === Number(ctx.match[1]) && o.userId === ctx.from.id);
+  if (!order || !order.sbp) return ctx.answerCbQuery('Платёж не найден.');
+  await ctx.answerCbQuery('Проверяю платёж…');
+  try {
+    const payment = await sbp.refresh(order);
+    await ctx.reply(payment.status === 'succeeded' ? '✅ Оплата получена.'
+      : ['canceled', 'rejected'].includes(payment.status) ? 'Платёж отменён или не создан. Выберите способ заново: /payments.'
+      : 'Оплата пока не подтверждена банком.');
+  } catch {
+    await ctx.reply('Не удалось проверить оплату. Бот повторит проверку автоматически.');
+  }
+});
+
+bot.action('confirm', async ctx => {
+  if (ctx.chat.type !== 'private') return ctx.answerCbQuery('Откройте личный чат с ботом.');
+  if (useSbp() ? !sbp.configured() : !process.env.YOOKASSA_PROVIDER_TOKEN) return ctx.answerCbQuery('Оплата ещё не настроена. Свяжитесь с администратором.', { show_alert: true });
+  if (ctx.session.step === 'payment' && ctx.session.orderId) {
+    await ctx.answerCbQuery();
+    const existing = orders.find(o => o.id === ctx.session.orderId && o.userId === ctx.from.id);
+    if (existing) await sendOrderInvoice(ctx, existing);
     return;
   }
-  
-  try {
-    const qrCodeUrl = await generateQRCode(paymentData);
-    
-    ctx.session.userId = ctx.from.id;
-    ctx.session.username = ctx.from.username;
-    
-    const order = createOrder(ctx.session, course);
-    
-    const adminNotify = generateAdminNewOrder(ctx.session, course) + 
-      `\n\n🆔 ID заявки: ${order.id}\n📋 ${order.orderNumber}`;
-    
-    await bot.telegram.sendMessage(ADMIN_ID, adminNotify, { parse_mode: 'Markdown' });
-    
-    await ctx.editMessageText(
-      `✅ **Запись оформлена!**\n\n` +
-      `📋 Заявка: ${order.orderNumber}\n` +
-      `🎯 Курс: ${course.name}\n` +
-      `📅 День: ${ctx.session.date}\n` +
-      `💰 Сумма: ${amount}₽\n\n` +
-      `💳 **Оплата через СБП**\n` +
-      `Отсканируйте QR-код:`,
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('✅ Я оплатил', 'paid')],
-          [Markup.button.callback('❓ Вопрос', 'ask_question')],
-          [Markup.button.callback('🔄 Заново', 'restart')]
-        ])
-      }
-    );
-    
-    await ctx.replyWithPhoto(
-      { source: Buffer.from(qrCodeUrl.split(',')[1], 'base64') },
-      {
-        caption: `💳 **Оплата: ${amount}₽**\n\n` +
-                 `1️⃣ Откройте приложение банка\n` +
-                 `2️⃣ "Оплата по QR-коду"\n` +
-                 `3️⃣ Наведите на QR-код\n` +
-                 `4️⃣ Подтвердите платёж\n\n` +
-                 `После оплаты нажмите "✅ Я оплатил"`,
-        parse_mode: 'Markdown'
-      }
-    );
-    
-    await ctx.answerCbQuery();
-  } catch (error) {
-    console.error('❌ Ошибка:', error);
-    await ctx.reply('❌ Ошибка. Попробуйте позже.', { ...getMainMenu() });
-  }
+  const course = COURSES_ALL[ctx.session.course];
+  if (!course || ctx.session.step !== 'confirm') return ctx.answerCbQuery('Начните запись заново.');
+  if (getAvailableSeats(ctx.session.course) <= 0) return ctx.answerCbQuery('Свободных мест больше нет.', { show_alert: true });
+  ctx.session.userId = ctx.from.id;
+  ctx.session.username = ctx.from.username;
+  const order = createOrder(ctx.session, course);
+  ctx.session.orderId = order.id;
+  ctx.session.step = 'payment';
+  await ctx.answerCbQuery();
+  await ctx.reply(`Заявка ${order.orderNumber}: ${course.name}\nСтоимость одного занятия: ${order.amount} ₽.\nОплатите счёт ниже. Повторно получить счёт: /payments.`);
+  await sendOrderInvoice(ctx, order);
+  await bot.telegram.sendMessage(ADMIN_ID, `Новая заявка ${order.orderNumber}: ${order.course}, ${order.amount} ₽. Ожидает оплаты.`)
+    .catch(() => console.error('Не удалось уведомить администратора о новой заявке'));
 });
 
 bot.action('show_kids', async (ctx) => {
@@ -1175,46 +1207,8 @@ bot.action('show_adults', async (ctx) => {
 
 // ============ ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ============
 
-bot.action('paid', async (ctx) => {
-  const course = COURSES_ALL[ctx.session.course];
-  
-  const order = orders.find(o => 
-    o.userId === ctx.from.id && 
-    o.status === ORDER_STATUS.PENDING &&
-    o.course === course.name
-  );
-  
-  if (order) {
-    updateOrderStatus(order.id, ORDER_STATUS.PAID, 'Оплата подтверждена пользователем', 'user');
-    
-    await bot.telegram.sendMessage(ADMIN_ID,
-      `✅ **Оплата подтверждена!**\n\n` +
-      `📋 ${order.orderNumber}\n` +
-      `🎯 ${order.course}\n` +
-      `👤 ${order.name}\n` +
-      `📅 ${order.date}\n` +
-      `💰 ${order.amount}₽`,
-      { parse_mode: 'Markdown' }
-    );
-  }
-  
-  await ctx.editMessageText(
-    `🎉 **Спасибо за оплату!**\n\n` +
-    `Ваша запись на курс **"${course.name}"** подтверждена!\n\n` +
-    `📅 День: ${ctx.session.date}\n` +
-    `🕐 Время: ${course.schedule}\n` +
-    `📍 ${SCHOOL_INFO.address}\n` +
-    `☎️ ${SCHOOL_INFO.phone}\n\n` +
-    `💪 До встречи!`,
-    {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('🔄 Новая запись', 'restart')]
-      ])
-    }
-  );
-  
-  await ctx.answerCbQuery('✅ Оплата подтверждена!');
+bot.action('paid', async ctx => {
+  await ctx.answerCbQuery('Оплата подтверждается автоматически. Получите счёт командой /payments.', { show_alert: true });
 });
 
 bot.action('ask_question', async (ctx) => {
@@ -1403,6 +1397,8 @@ bot.action(/resolved_(.+)/, async (ctx) => {
   await ctx.reply(`✅ Вопрос пользователя ${userId} решён.`);
 });
 
+bot.catch((error) => { console.error('Ошибка обработки события:', error.message); });
+
 // ============ ЗАПУСК ============
 console.log('💃 Бот для записи на танцы запускается...');
 console.log(`👤 ID администратора: ${ADMIN_ID}`);
@@ -1411,16 +1407,22 @@ console.log(`🧑 Взрослых курсов: ${Object.keys(COURSES_ADULTS).l
 console.log(`📦 Загружено заявок: ${orders.length}`);
 console.log(`🔢 Следующий номер заявки: ${orderCounter}`);
 
+const sbpTimer = setInterval(() => { void sbp.poll(); }, 15000);
+sbpTimer.unref();
+void sbp.poll();
+
 bot.launch()
   .then(() => console.log('✅ Бот успешно запущен!'))
   .catch((err) => console.error('❌ Ошибка запуска:', err));
 
 process.once('SIGINT', () => {
+  clearInterval(sbpTimer);
   bot.stop('SIGINT');
   console.log('\n👋 Бот остановлен');
 });
 
 process.once('SIGTERM', () => {
+  clearInterval(sbpTimer);
   bot.stop('SIGTERM');
   saveOrders();
   saveCounter();
