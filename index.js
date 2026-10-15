@@ -1,3 +1,4 @@
+const { TARIFFS, rubles, tariffSnapshot, priceList } = require('./pricing');
 const { Telegraf, Markup } = require('telegraf');
 const LocalSession = require('telegraf-session-local');
 const { randomUUID } = require('crypto');
@@ -89,6 +90,7 @@ const useSbp = () => process.env.PAYMENT_FLOW !== 'telegram';
 // ============ ФУНКЦИИ РАБОТЫ С ЗАЯВКАМИ ============
 
 function createOrder(session, course) {
+  const tariff = tariffSnapshot(session.tariffId);
   const order = {
     paymentPayload: randomUUID(),
     id: orderCounter++,
@@ -99,7 +101,8 @@ function createOrder(session, course) {
     name: session.name,
     phone: session.phone,
     date: session.date,
-    amount: course.price,
+    tariff,
+    amount: tariff.price,
     status: ORDER_STATUS.PENDING,
     userId: session.userId,
     username: session.username || 'нет',
@@ -367,13 +370,13 @@ function generateWelcome(name) {
 
 // БЕЗ счётчиков мест!
 function generateCourseList(courses, title) {
-  let message = `${title}\n\n`;
+  let message = `${title}\n\n⏱ Занятие — 1 час. Единый прайс: /prices\n\n`;
   
   for (const [key, course] of Object.entries(courses)) {
     const indicator = getSeatsIndicator(key);
     
     message += `**${course.name}** ${indicator}\n`;
-    message += `💰 ${course.price}₽ | ⏱ ${course.duration}\n`;
+
     message += `📅 ${course.schedule}\n`;
     message += `🎯 ${course.level}\n\n`;
   }
@@ -388,7 +391,7 @@ function generateCourseSelected(course, occupied) {
   
   return `${indicator} Вы выбрали курс: **${course.name}**\n\n` +
     `📖 ${course.description}\n` +
-    `💰 Цена: ${course.price}₽\n` +
+    `💰 Пробное — 900 ₽, разовое — 1 100 ₽. Абонементы: /prices\n` +
     `⏱ Длительность: ${course.duration}\n` +
     `📅 Расписание: ${course.schedule}\n` +
     `🎯 Уровень: ${course.level}\n\n` +
@@ -415,7 +418,10 @@ function generateConfirm(session) {
     `👤 Имя: ${session.name}\n` +
     `📱 Телефон: ${session.phone}\n` +
     `📅 День: ${session.date}\n` +
-    `💰 Сумма: ${course.price}₽\n\n` +
+    `🎟 Тариф: ${TARIFFS[session.tariffId].name}\n` +
+    `💰 К оплате: ${rubles(TARIFFS[session.tariffId].price)}\n` +
+    (TARIFFS[session.tariffId].months ? '📅 Срок: 1 месяц с момента активации\n' : '') +
+    `⏱ Одно занятие — 1 час\n\n` +
     `✅ Всё верно?`;
 }
 
@@ -460,7 +466,7 @@ function generateAdminNewOrder(session, course) {
     `👤 Имя: ${session.name}\n` +
     `📱 Телефон: ${session.phone}\n` +
     `📅 День: ${session.date}\n` +
-    `💰 Сумма: ${course.price}₽\n` +
+    `🎟 Тариф: ${TARIFFS[session.tariffId].name}\n💰 Сумма: ${TARIFFS[session.tariffId].price}₽\n` +
     `🆔 Пользователь: ${session.userId}\n` +
     `📱 Username: @${session.username || 'нет'}\n\n` +
     `⏳ Ожидает оплаты`;
@@ -628,6 +634,8 @@ bot.command('order', async (ctx) => {
     `👤 Имя: ${order.name}\n` +
     `📱 Телефон: ${order.phone}\n` +
     `📅 День: ${order.date}\n` +
+    `🎟 Тариф: ${order.tariff?.name || 'Не указан (старая заявка)'}\n` +
+    (order.tariff?.months ? '📅 Абонемент: 1 месяц с момента активации\n' : '') +
     `💰 Сумма: ${order.amount}₽\n` +
     `📌 Статус: ${statusEmoji} ${statusText}\n` +
     `🆔 Пользователь: ${order.userId}\n` +
@@ -913,6 +921,8 @@ bot.action(/course_(.+)/, async (ctx) => {
     return;
   }
   
+  delete ctx.session.tariffId;
+  delete ctx.session.orderId;
   ctx.session.course = courseKey;
   ctx.session.step = 'enter_name';
   
@@ -935,18 +945,30 @@ bot.action(/day_(.+)/, async (ctx) => {
     return;
   }
   
+  if (ctx.session.step !== 'choose_day' || !parseDaysFromSchedule(COURSES_ALL[ctx.session.course].schedule).includes(day)) {
+    return ctx.answerCbQuery('Выберите день в текущей записи.');
+  }
   ctx.session.date = day;
-  ctx.session.step = 'confirm';
-  
-  await ctx.editMessageText(
-    generateConfirm(ctx.session),
-    {
-      parse_mode: 'Markdown',
-      ...getConfirmButtons()
-    }
-  );
-  await ctx.answerCbQuery(`Выбран: ${day}`);
+  ctx.session.step = 'choose_tariff';
+  await ctx.editMessageText(priceList() + '\n\n👇 Выберите тариф для записи:', {
+    ...Markup.inlineKeyboard([
+      ...Object.entries(TARIFFS).map(([id, tariff]) => [Markup.button.callback(`${tariff.name} · ${rubles(tariff.price)}`, `tariff_${id}`)]),
+      [Markup.button.callback('❌ Отмена', 'cancel')]
+    ])
+  });
+  await ctx.answerCbQuery();
 });
+
+bot.action(/^tariff_(\w+)$/, async ctx => {
+  const id = ctx.match[1];
+  if (ctx.session?.step !== 'choose_tariff' || !Object.hasOwn(TARIFFS, id)) return ctx.answerCbQuery('Начните запись заново.');
+  ctx.session.tariffId = id;
+  ctx.session.step = 'confirm';
+  await ctx.editMessageText(generateConfirm(ctx.session), { parse_mode: 'Markdown', ...getConfirmButtons() });
+  await ctx.answerCbQuery();
+});
+
+bot.command('prices', ctx => ctx.reply(priceList()));
 
 // ============ ОБРАБОТКА ТЕКСТА ============
 
@@ -1134,7 +1156,7 @@ async function sendOrderInvoice(ctx, order) {
   if (!order.paymentPayload) { order.paymentPayload = randomUUID(); saveOrders(); }
   try {
     if (useSbp() || order.sbp) {
-      await ctx.reply(`Заявка ${order.orderNumber}. К оплате: ${order.amount} ₽.\nВыберите способ оплаты:`, paymentMethodsKeyboard(order));
+      await ctx.reply(`Заявка ${order.orderNumber}. ${order.tariff?.name || 'Занятие'}. К оплате: ${order.amount} ₽.\nВыберите способ оплаты:`, paymentMethodsKeyboard(order));
     } else {
       await ctx.replyWithInvoice(invoiceFor(order));
     }
@@ -1169,7 +1191,7 @@ bot.action('confirm', async ctx => {
     return;
   }
   const course = COURSES_ALL[ctx.session.course];
-  if (!course || ctx.session.step !== 'confirm') return ctx.answerCbQuery('Начните запись заново.');
+  if (!course || ctx.session.step !== 'confirm' || !Object.hasOwn(TARIFFS, ctx.session.tariffId)) return ctx.answerCbQuery('Начните запись заново.');
   if (getAvailableSeats(ctx.session.course) <= 0) return ctx.answerCbQuery('Свободных мест больше нет.', { show_alert: true });
   ctx.session.userId = ctx.from.id;
   ctx.session.username = ctx.from.username;
@@ -1177,9 +1199,9 @@ bot.action('confirm', async ctx => {
   ctx.session.orderId = order.id;
   ctx.session.step = 'payment';
   await ctx.answerCbQuery();
-  await ctx.reply(`Заявка ${order.orderNumber}: ${course.name}\nСтоимость одного занятия: ${order.amount} ₽.\nОплатите счёт ниже. Повторно получить счёт: /payments.`);
+  await ctx.reply(`Заявка ${order.orderNumber}: ${course.name}\nТариф: ${order.tariff.name}\nК оплате: ${rubles(order.amount)}.\nОплатите счёт ниже. Повторно получить счёт: /payments.`);
   await sendOrderInvoice(ctx, order);
-  await bot.telegram.sendMessage(ADMIN_ID, `Новая заявка ${order.orderNumber}: ${order.course}, ${order.amount} ₽. Ожидает оплаты.`)
+  await bot.telegram.sendMessage(ADMIN_ID, `Новая заявка ${order.orderNumber}: ${order.course}, ${order.tariff.name}, ${order.amount} ₽. Ожидает оплаты.`)
     .catch(() => console.error('Не удалось уведомить администратора о новой заявке'));
 });
 

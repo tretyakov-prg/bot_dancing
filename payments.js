@@ -1,3 +1,4 @@
+const { orderItem } = require('./pricing');
 const { randomUUID } = require('crypto');
 
 function amountInKopecks(value) {
@@ -13,12 +14,12 @@ function invoiceFor(order, env = process.env) {
   if (!env.YOOKASSA_PROVIDER_TOKEN) throw new Error('Не задан YOOKASSA_PROVIDER_TOKEN');
   const amount = amountInKopecks(order.amount);
   const invoice = {
-    title: `Занятие: ${order.course}`.slice(0, 32),
-    description: `${order.orderNumber}: ${order.course}. День: ${order.date}`.slice(0, 255),
+    title: orderItem(order).slice(0, 32),
+    description: `${order.orderNumber}: ${orderItem(order)}. День: ${order.date}`.slice(0, 255),
     payload: order.paymentPayload,
     provider_token: env.YOOKASSA_PROVIDER_TOKEN,
     currency: 'RUB',
-    prices: [{ label: 'Одно занятие', amount }],
+    prices: [{ label: order.tariff?.name || 'Занятие', amount }],
     start_parameter: `order_${order.id}`,
   };
   if (env.YOOKASSA_RECEIPT_ENABLED === 'true') {
@@ -29,7 +30,7 @@ function invoiceFor(order, env = process.env) {
     invoice.need_email = true;
     invoice.send_email_to_provider = true;
     invoice.provider_data = JSON.stringify({ receipt: { items: [{
-      description: `Занятие: ${order.course}`.slice(0, 128), quantity: '1.00',
+      description: orderItem(order).slice(0, 128), quantity: '1.00',
       amount: { value: (amount / 100).toFixed(2), currency: 'RUB' },
       vat_code: vat, payment_mode: env.YOOKASSA_PAYMENT_MODE, payment_subject: 'service',
     }] } });

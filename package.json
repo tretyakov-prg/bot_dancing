@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test payments.test.js sbp.test.js",
+    "test": "node --test payments.test.js sbp.test.js pricing.test.js",
     "start": "node index.js"
   },
   "keywords": [],

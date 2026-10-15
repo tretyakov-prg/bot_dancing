@@ -1,3 +1,4 @@
+const { orderItem } = require('./pricing');
 const { randomUUID } = require('crypto');
 const { amountInKopecks } = require('./payments');
 const isActiveSbp = order => Boolean(order.sbp && !['canceled', 'succeeded', 'rejected'].includes(order.sbp.status));
@@ -10,7 +11,7 @@ function paymentBody(order, env, method = 'sbp') {
     amount: { value: (amountInKopecks(order.amount) / 100).toFixed(2), currency: 'RUB' },
     capture: true, payment_method_data: { type: method },
     confirmation: { type: 'redirect', return_url: returnUrl.href },
-    description: `${order.orderNumber}: занятие ${order.course}`.slice(0, 128),
+    description: `${order.orderNumber}: ${orderItem(order)}`.slice(0, 128),
     metadata: { order_id: String(order.id), user_id: String(order.userId) },
   };
   if (env.YOOKASSA_RECEIPT_ENABLED === 'true') {
@@ -19,7 +20,7 @@ function paymentBody(order, env, method = 'sbp') {
     if (!/^7\d{10}$/.test(phone)) throw Error('Для чека нужен телефон в формате 8XXXXXXXXXX');
     if (!Number.isInteger(vat) || vat < 1 || vat > 12 || !env.YOOKASSA_PAYMENT_MODE) throw Error('Настройте параметры чека');
     body.receipt = { customer: { phone }, items: [{
-      description: `Занятие: ${order.course}`.slice(0, 128), quantity: '1.00', amount: body.amount,
+      description: orderItem(order).slice(0, 128), quantity: '1.00', amount: body.amount,
       vat_code: vat, payment_mode: env.YOOKASSA_PAYMENT_MODE, payment_subject: 'service',
     }] };
   }
